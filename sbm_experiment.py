@@ -13,9 +13,9 @@ def run_sbm_experiment():
     """Run SBM experiment with incremental edge addition"""
 
     # Parameters
-    n = 100  # total vertices
+    n = 500  # total vertices
     k = 3     # number of clusters
-    p = 0.6   # intra-cluster edge probability
+    p = 0.5   # intra-cluster edge probability
     q = 0.1  # inter-cluster edge probability
 
     # Divide vertices equally among clusters
@@ -39,8 +39,8 @@ def run_sbm_experiment():
     print(f"Cluster sizes: {[len(c) for c in clusters]}")
 
     # Now add random edges incrementally
-    num_steps = 10  # Number of steps to add edges
-    edges_per_step = 5  # Number of edges to add per step
+    num_steps = 2  # Number of steps to add edges
+    edges_per_step = 10  # Number of edges to add per step
 
     for step in range(1, num_steps + 1):
         print(f"\nStep {step}: Adding {edges_per_step} random edges...")
