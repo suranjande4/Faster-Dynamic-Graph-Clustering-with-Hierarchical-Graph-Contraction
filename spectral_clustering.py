@@ -59,7 +59,10 @@ def spectral_clustering(graph: Graph, num_clusters: int, num_eigenvectors=None, 
     else:
         laplacian_matrix = g.normalised_laplacian().to_scipy()
         _, eigenvectors = scipy.sparse.linalg.eigsh(laplacian_matrix, num_eigenvectors, which='SM')
-        labels = KMeans(n_clusters=num_clusters, n_init=10).fit_predict(eigenvectors)
+        # Fix random_state so repeated runs are reproducible.
+        labels = KMeans(n_clusters=num_clusters, n_init=10, random_state=0).fit_predict(
+            eigenvectors
+        )
 
     # # Get the normalised laplacian matrix of the graph
     # if 'edge_weight' in graph.ep.keys():

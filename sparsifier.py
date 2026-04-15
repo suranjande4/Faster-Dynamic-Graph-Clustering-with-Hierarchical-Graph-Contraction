@@ -93,9 +93,15 @@ class DynamicGraphSparsifier:
         affected_nodes = set(chain.from_iterable(incoming_edges))
 
         # new_nodes = affected_nodes - set(range(self.original_graph.num_vertices()))
-        for i in range(n - n_sparse_old):
+        if self.used_sampling_parameters is None:
+            self.used_sampling_parameters = np.array(log_n / np.maximum(self.degree_array, 1))
+
+        for vertex_idx in range(n_sparse_old, n):
             self.sparsified_graph.add_vertex()
-            self.used_sampling_parameters = np.append(self.used_sampling_parameters, log_n/self.degree_array[i])
+            sampling_parameter = log_n / max(1, self.degree_array[vertex_idx])
+            self.used_sampling_parameters = np.append(
+                self.used_sampling_parameters, sampling_parameter
+            )
 
         start_time = time.time()
 
@@ -163,10 +169,7 @@ class DynamicGraphSparsifier:
         # Assign weights to the edges based on their sampling probabilities
         weights = 1 / probs[edges_to_add_indices]
         print_verbose("Sampling and weight calculation", start_time)
-
-        weights = np.array([1 / probs[random_values < probs]]).T
-
-        edges_to_add_with_weights = np.concatenate((edges_to_add, weights), axis=1)
+        edges_to_add_with_weights = np.concatenate((edges_to_add, weights[:, None]), axis=1)
         start_time = time.time()
 
         # Add sampled edges to the sparsified graph

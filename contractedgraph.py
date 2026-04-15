@@ -218,6 +218,9 @@ class Contracted_Graph:
             # self.original_graph.vertex() above
             if not (source < 0 or target < 0) and (source < self.og_num_contract_nodes and target < self.og_num_contract_nodes):
                 edge = self.contracted_graph.edge(source, target)
+                if edge is None:
+                    # Guard against sparse/contracted states where this pair has no explicit edge yet.
+                    continue
 
                 # decrease edge weight based on edges that are pulled output
                 self.contracted_graph.ep["edge_weight"][edge] -= total_weights[i]
