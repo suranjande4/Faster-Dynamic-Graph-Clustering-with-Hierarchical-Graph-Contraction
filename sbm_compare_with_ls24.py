@@ -8,13 +8,16 @@ from contractedgraph import Contracted_Graph
 from sbm import DynamicSBMGraphMerge
 from semicontracted import SemiContractedGraph
 from sparsifier import DynamicGraphSparsifier
+from sklearn.metrics import adjusted_rand_score
 from spectral_clustering import (
     clusters_to_labels,
     run_spectral_clustering,
     spectral_clustering,
 )
+from hierarchy_contracted import HierarchicalContractedStructure as _HierarchyClass
 
 
+    
 def _norm_edge(u, v):
     u = int(u)
     v = int(v)
@@ -254,13 +257,84 @@ class SemiContractedRunner:
         }
 
 
+class HierarchyRunner:
+    """Hierarchy algorithm using the single-sparsifier hierarchy implementation."""
+
+    def __init__(
+        self,
+        graph,
+        true_labels,
+        k,
+        num_levels=3,
+        sampling_constant=80,
+        degree_trigger=0.5,
+    ):
+        self.graph = graph
+        self.true_labels = np.array(true_labels)
+        self.k = int(k)
+        self.hier = _HierarchyClass(
+            base_graph=self.graph,
+            num_clusters=int(self.k),
+            num_levels=int(num_levels),
+            sampling_constant=int(sampling_constant),
+            degree_trigger=float(degree_trigger),
+        )
+
+    def add_edge_batch(self, edges):
+        info = self.hier.update_hierarchy(edges)
+        return {"num_applied": int(info.get("num_applied", 0))}
+
+    def query(self):
+        if self.hier.active_levels <= 0:
+            return {"ari": float("nan"), "runtime": 0.0}
+
+        state = self.hier.levels[self.hier.active_levels - 1]
+        if state is None:
+            return {"ari": float("nan"), "runtime": 0.0}
+
+        cg = state.semi.contracted.contracted_graph
+        if int(cg.num_vertices()) == 0:
+            return {"ari": float("nan"), "runtime": 0.0}
+
+        k_eff = max(1, min(int(self.k), int(cg.num_vertices())))
+
+        # Query runtime tracks only spectral clustering on deepest contracted graph.
+        t0 = time.perf_counter()
+        clusters_level = spectral_clustering(cg, k_eff)
+        runtime = time.perf_counter() - t0
+
+        base_clusters = []
+        for cluster in clusters_level:
+            base_nodes = set()
+            for node in cluster:
+                idx = int(node)
+                if 0 <= idx < len(state.base_node_map):
+                    base_nodes.update(state.base_node_map[idx])
+            base_clusters.append(sorted(base_nodes))
+
+        labels_pred = clusters_to_labels(
+            base_clusters, num_data_points=int(self.hier.base_graph.num_vertices())
+        )
+        m = min(len(self.true_labels), len(labels_pred))
+        if m <= 0:
+            ari = float("nan")
+        else:
+            ari = float(
+                adjusted_rand_score(
+                    np.array(self.true_labels[:m]), np.array(labels_pred[:m])
+                )
+            )
+
+        return {"ari": float(ari), "runtime": float(runtime)}
+
+
 def run_sbm_batch_comparison():
     # 4 clusters, total n=5000
     sizes = [5000, 1500, 1000, 2500]
     k = len(sizes)
-    p = 0.04
+    p = 0.06
     q = 0.01
-    num_updates = 5000
+    num_updates = 2000
     batch_size = 50
     seed_graph = 7
     seed_updates = 19
@@ -269,6 +343,7 @@ def run_sbm_batch_comparison():
     degree_trigger = 0.5
     gamma = 2.0
     beta = 0.5
+    num_levels = 2
 
     np.random.seed(seed_graph)
     base_sbm = DynamicSBMGraphMerge(k=k, sizes=sizes, p=p, q=q)
@@ -288,6 +363,7 @@ def run_sbm_batch_comparison():
 
     graph_ls24 = gt.Graph(base_graph)
     graph_semi = gt.Graph(base_graph)
+    graph_hier = gt.Graph(base_graph)
 
     ls24 = LS24Runner(
         graph=graph_ls24,
@@ -305,92 +381,113 @@ def run_sbm_batch_comparison():
         sampling_constant=sampling_constant,
         degree_trigger=degree_trigger,
     )
+    hier = HierarchyRunner(
+        graph=graph_hier,
+        true_labels=true_labels,
+        k=k,
+        num_levels=num_levels,
+        sampling_constant=sampling_constant,
+        degree_trigger=degree_trigger,
+    )
 
-    print("Running comparison on SBM (5000 nodes, 4 clusters, batch updates)")
+    print("Running comparison on SBM (LS24 vs SemiContracted vs Hierarchy)")
     print(f"  sizes={sizes}, p={p}, q={q}")
-    print(f"  total_updates={len(updates)}, batch_size={batch_size}, num_batches={len(batches)}")
+    print(
+        f"  total_updates={len(updates)}, batch_size={batch_size}, num_batches={len(batches)}, "
+        f"num_levels={num_levels}"
+    )
     print()
 
-    sep = "+-------------+------------+----------------+----------------+----------------+----------------+----------+----------+"
-    header = "| num_updates | batch_size |     ls24_time |    semi_time   |  ls24_upd_time |  semi_upd_time | ls24_ari | semi_ari |"
+    sep = "+-------------+----------+----------------------+---------------------+----------+----------------------+---------------------+----------+----------------------+---------------------+"
+    header = (
+        "| num_updates | ls24_ari  | ls24_cum_update_s  | ls24_cum_query_s  | semi_ari  | semi_cum_update_s  | semi_cum_query_s  | hier_ari  | hier_cum_update_s  | hier_cum_query_s  |"
+    )
     print(sep)
     print(header)
     print(sep)
 
     rows = []
-    ls24_cum = 0.0
-    semi_cum = 0.0
     ls24_update_cum = 0.0
     semi_update_cum = 0.0
+    hier_update_cum = 0.0
+    ls24_query_cum = 0.0
+    semi_query_cum = 0.0
+    hier_query_cum = 0.0
     processed_updates = 0
 
-    for batch_idx, batch in enumerate(batches, start=1):
-        t0 = time.time()
-        ls24_update = ls24.add_edge_batch(batch)
-        t_update_ls24 = time.time() - t0
+    for batch in batches:
+        t0 = time.perf_counter()
+        ls24.add_edge_batch(batch)
+        t_update_ls24 = time.perf_counter() - t0
         ls24_update_cum += t_update_ls24
 
-        t0 = time.time()
         ls24_q = ls24.query()
-        t_query_ls24 = time.time() - t0
-        ls24_step_time = t_update_ls24 + t_query_ls24
-        ls24_cum += ls24_step_time
+        t_query_ls24 = float(ls24_q.get("runtime", 0.0))
+        ls24_query_cum += t_query_ls24
 
-        semi_update = semi.add_edge_batch(batch)
-        t_update_semi = float(semi_update.get("update_runtime_s", 0.0))
+        t0 = time.perf_counter()
+        semi.add_edge_batch(batch)
+        t_update_semi = time.perf_counter() - t0
         semi_update_cum += t_update_semi
 
-        t0 = time.time()
         semi_q = semi.query()
-        t_query_semi = time.time() - t0
-        semi_step_time = t_update_semi + t_query_semi
-        semi_cum += semi_step_time
+        t_query_semi = float(semi_q.get("runtime", 0.0))
+        semi_query_cum += t_query_semi
+
+        t0 = time.perf_counter()
+        hier.add_edge_batch(batch)
+        t_update_hier = time.perf_counter() - t0
+        hier_update_cum += t_update_hier
+
+        hier_q = hier.query()
+        t_query_hier = float(hier_q.get("runtime", 0.0))
+        hier_query_cum += t_query_hier
 
         processed_updates += len(batch)
+        ls24_ari = float(ls24_q["ari"])
+        semi_ari = float(semi_q["ari"])
+        hier_ari = float(hier_q["ari"])
 
         rows.append(
             {
-                "batch": batch_idx,
                 "num_updates": int(processed_updates),
-                "batch_size": int(len(batch)),
-                "ls24_applied": int(ls24_update["num_applied"]),
-                "semi_applied": int(semi_update["num_applied"]),
-                "ls24_source": ls24_q["source"],
-                "semi_source": semi_q["source"],
-                "ls24_ari": float(ls24_q["ari"]),
-                "semi_ari": float(semi_q["ari"]),
-                "ls24_step_runtime_s": float(ls24_step_time),
-                "semi_step_runtime_s": float(semi_step_time),
-                "ls24_cumulative_runtime_s": float(ls24_cum),
-                "semi_cumulative_runtime_s": float(semi_cum),
+                "ls24_ari": float(ls24_ari),
+                "semi_ari": float(semi_ari),
+                "hierarchy_ari": float(hier_ari),
                 "ls24_cumulative_update_runtime_s": float(ls24_update_cum),
                 "semi_cumulative_update_runtime_s": float(semi_update_cum),
-                "ls24_updates_since_rebuild": int(ls24_q["updates_since_rebuild"]),
-                "ls24_threshold": int(ls24_q["threshold"]),
-                "semi_alpha": int(semi_q["alpha"]),
-                "semi_alpha_limit": int(semi_q["alpha_limit"]),
+                "hierarchy_cumulative_update_runtime_s": float(hier_update_cum),
+                "ls24_cumulative_query_runtime_s": float(ls24_query_cum),
+                "semi_cumulative_query_runtime_s": float(semi_query_cum),
+                "hierarchy_cumulative_query_runtime_s": float(hier_query_cum),
             }
         )
 
         print(
             f"| {processed_updates:11d} | "
-            f"{len(batch):10d} | "
-            f"{ls24_cum:14.3f} | "
-            f"{semi_cum:14.3f} | "
-            f"{ls24_update_cum:14.3f} | "
-            f"{semi_update_cum:14.3f} | "
-            f"{ls24_q['ari']:8.4f} | "
-            f"{semi_q['ari']:8.4f} |"
+            f"{ls24_ari:8.4f} | "
+            f"{ls24_update_cum:20.4f} | "
+            f"{ls24_query_cum:19.4f} | "
+            f"{semi_ari:8.4f} | "
+            f"{semi_update_cum:20.4f} | "
+            f"{semi_query_cum:19.4f} | "
+            f"{hier_ari:8.4f} | "
+            f"{hier_update_cum:20.4f} | "
+            f"{hier_query_cum:19.4f} |"
         )
 
     print(sep)
     print("Summary")
+    print(f"  final_num_updates={rows[-1]['num_updates']}")
     print(f"  final_ls24_ari={rows[-1]['ls24_ari']:.4f}")
     print(f"  final_semi_ari={rows[-1]['semi_ari']:.4f}")
-    print(f"  final_ls24_cumulative_runtime_s={rows[-1]['ls24_cumulative_runtime_s']:.3f}")
-    print(f"  final_semi_cumulative_runtime_s={rows[-1]['semi_cumulative_runtime_s']:.3f}")
+    print(f"  final_hierarchy_ari={rows[-1]['hierarchy_ari']:.4f}")
     print(f"  final_ls24_cumulative_update_runtime_s={rows[-1]['ls24_cumulative_update_runtime_s']:.3f}")
     print(f"  final_semi_cumulative_update_runtime_s={rows[-1]['semi_cumulative_update_runtime_s']:.3f}")
+    print(f"  final_hierarchy_cumulative_update_runtime_s={rows[-1]['hierarchy_cumulative_update_runtime_s']:.3f}")
+    print(f"  final_ls24_cumulative_query_runtime_s={rows[-1]['ls24_cumulative_query_runtime_s']:.3f}")
+    print(f"  final_semi_cumulative_query_runtime_s={rows[-1]['semi_cumulative_query_runtime_s']:.3f}")
+    print(f"  final_hierarchy_cumulative_query_runtime_s={rows[-1]['hierarchy_cumulative_query_runtime_s']:.3f}")
 
     results_dir = "results"
     if not os.path.exists(results_dir):
@@ -400,7 +497,7 @@ def run_sbm_batch_comparison():
     out_path = os.path.join(
         results_dir,
         (
-            f"compare_ls24_vs_semicontracted_sbm_"
+            f"compare_ls24_vs_semicontracted_vs_hierarchy_sbm_"
             f"n_{sum(sizes)}_k_{k}_updates_{len(updates)}_batch_{batch_size}_{timestamp}.csv"
         ),
     )

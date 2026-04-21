@@ -35,6 +35,12 @@ class Contracted_Graph:
         self.contracted_node_to_full_node_map = []
         self.contract_idx_to_vertex_label = []
 
+    @staticmethod
+    def _degree_array(graph):
+        if "edge_weight" in graph.edge_properties:
+            return graph.degree_property_map("total", weight=graph.ep["edge_weight"]).a.copy()
+        return graph.degree_property_map("total").a.copy()
+
     def initialize(self, clusters, labels):
         """
         Initialises the contracted graph based on the provided clustering.
@@ -70,12 +76,18 @@ class Contracted_Graph:
         vertex_index_to_cluster_mapping = np.full(idx_to_og_idx_array.max() + 1, -1, dtype=int)
         vertex_index_to_cluster_mapping[idx_to_og_idx_array] = cluster_assignments
 
-        # Transforming edge list vertex indices to cluster indices, including handling of zero-weight edges
+        # Transform edge list vertex indices to cluster indices.
         clusters_source = vertex_index_to_cluster_mapping[edges_sparsified_graph[:, 0].astype(int)]
         clusters_target = vertex_index_to_cluster_mapping[edges_sparsified_graph[:, 1].astype(int)]
+        # Canonicalize undirected cluster pairs.
+        canon_source = np.minimum(clusters_source, clusters_target)
+        canon_target = np.maximum(clusters_source, clusters_target)
 
         # Aggregating edge weights by cluster pairs
-        cluster_pairs_and_weights = np.concatenate((clusters_source[:, None], clusters_target[:, None], edges_sparsified_graph[:, 2][:, None]), axis=1)
+        cluster_pairs_and_weights = np.concatenate(
+            (canon_source[:, None], canon_target[:, None], edges_sparsified_graph[:, 2][:, None]),
+            axis=1,
+        )
         unique_pairs, indices = np.unique(cluster_pairs_and_weights[:, :2].astype(int), axis=0, return_inverse=True)
         total_weights = np.zeros(unique_pairs.shape[0], dtype=float)
         np.add.at(total_weights, indices, cluster_pairs_and_weights[:, 2])
@@ -83,44 +95,26 @@ class Contracted_Graph:
         # Assuming 'num_clusters' is the total number of unique clusters
         num_clusters = len(clusters)
 
-        # Generate all possible pairs of clusters (including self-pairs for undirected graphs)
-        all_cluster_pairs = np.array([[i, j] for i in range(num_clusters) for j in range(num_clusters)])
-
-        # Initialize an array for weights of all cluster pairs, defaulting to zero
-        all_weights = np.zeros(len(all_cluster_pairs))
-
-        # Map from unique_pairs to their indices for quick lookup
-        pair_to_index = {tuple(pair): i for i, pair in enumerate(unique_pairs)}
-
-        # Populate the weights for existing pairs
-        for i, pair in enumerate(all_cluster_pairs):
-            if tuple(pair) in pair_to_index:
-                all_weights[i] = total_weights[pair_to_index[tuple(pair)]]
-
         # Prepare an edge property map for weights in the contracted graph
+        self.contracted_graph.add_vertex(num_clusters)
         edge_weight = self.contracted_graph.new_edge_property("double")
-
-        # Iterate over each pair and add an edge with the corresponding weight
-        for pair, weight in zip(all_cluster_pairs, all_weights):
-            source_cluster, target_cluster = pair
-            # Add edge between clusters
-            e = self.contracted_graph.add_edge(source_cluster,
-                                               target_cluster)
-            # Set the edge weight
-            if source_cluster == target_cluster:
-                edge_weight[e] = weight
-            else:
-                edge_weight[e] = weight
+        if len(unique_pairs) > 0:
+            positive = total_weights > 0
+            if np.any(positive):
+                edges_and_weights = np.column_stack(
+                    (unique_pairs[positive].astype(int), total_weights[positive].astype(float))
+                )
+                self.contracted_graph.add_edge_list(edges_and_weights, eprops=[edge_weight])
 
         # Attach the edge property map to the contracted graph
         self.contracted_graph.edge_properties["edge_weight"] = edge_weight
 
 
         # set the degrees that were used to construct the contracted graph
-        self.degree_array = self.original_graph.degree_property_map("total").a
+        self.degree_array = self._degree_array(self.original_graph)
 
         # store this array, which is needed to keep track of what vertices are pulled out
-        self.degree_array_at_construction = self.degree_array
+        self.degree_array_at_construction = self.degree_array.copy()
 
         return
 
@@ -130,11 +124,22 @@ class Contracted_Graph:
         Given a set of edges, this function computes the representative edge weight
         updates in the contracted graph using pandas for faster unique row identification.
         """
-        # Reindex edges to contracted graph cluster indices
+        if edges is None or len(edges) == 0:
+            return np.zeros((0, 2), dtype=int), np.zeros(0, dtype=float)
+
+        edges = np.asarray(edges)
+        if edges.ndim == 1:
+            edges = edges.reshape(1, -1)
+
+        # Reindex edges to contracted graph cluster indices.
         reindexed_source = og_vertex_to_contract_idx[edges[:, 0].astype(int)]
         reindexed_target = og_vertex_to_contract_idx[edges[:, 1].astype(int)]
-        # Add a one column to represent initial weights between edges
-        reindexed_edges = np.column_stack((reindexed_source, reindexed_target, np.ones(len(reindexed_source), dtype=int)))
+        # Canonicalize undirected pairs.
+        reindexed_min = np.minimum(reindexed_source, reindexed_target)
+        reindexed_max = np.maximum(reindexed_source, reindexed_target)
+        # If a weight column is present, use it; otherwise default to one.
+        input_weights = edges[:, 2].astype(float) if edges.shape[1] >= 3 else np.ones(len(reindexed_source), dtype=float)
+        reindexed_edges = np.column_stack((reindexed_min, reindexed_max, input_weights))
 
         start_time = time.time()
 
@@ -145,8 +150,8 @@ class Contracted_Graph:
         grouped = df_edges.groupby(['source', 'target']).sum().reset_index()
 
         # Extract the unique pairs and total weights
-        unique_pairs = grouped[['source', 'target']].values
-        total_weights = grouped['weight'].values
+        unique_pairs = grouped[['source', 'target']].values.astype(int)
+        total_weights = grouped['weight'].values.astype(float)
 
         return unique_pairs, total_weights
 
@@ -164,7 +169,7 @@ class Contracted_Graph:
         n_at_construction = len(self.degree_array_at_construction)
 
         # get the new degree values
-        self.degree_array = self.original_graph.degree_property_map("total").a
+        self.degree_array = self._degree_array(self.original_graph)
 
 
         # detect how much the degrees have changed of every vertex
@@ -180,27 +185,46 @@ class Contracted_Graph:
 
         old_vertices_to_pull_out_set = set(old_vertices_to_pull_out)
 
-        # now get the edges adjacent to old vertices, which are to be added to the contracted graph
-        old_edges_to_add = np.array([[0,0]])
+        # Collect weighted edges adjacent to pulled-out vertices.
+        has_edge_weights = "edge_weight" in self.original_graph.edge_properties
+        old_edges_to_add = np.zeros((0, 3), dtype=float)
         for vertex_idx in old_vertices_to_pull_out:
             vertex = self.original_graph.vertex(vertex_idx)
-            adjacent_edges = self.original_graph.get_all_edges(vertex)
-            old_edges_to_add = np.vstack((old_edges_to_add, adjacent_edges))
+            if has_edge_weights:
+                adjacent_edges = self.original_graph.get_all_edges(
+                    vertex, [self.original_graph.ep["edge_weight"]]
+                )
+                if adjacent_edges.size == 0:
+                    continue
+                adjacent_edges = np.asarray(adjacent_edges)
+                if adjacent_edges.ndim == 1:
+                    adjacent_edges = adjacent_edges.reshape(1, -1)
+                old_edges_to_add = np.vstack((old_edges_to_add, adjacent_edges[:, :3].astype(float)))
+            else:
+                adjacent_edges = self.original_graph.get_all_edges(vertex)
+                if adjacent_edges.size == 0:
+                    continue
+                adjacent_edges = np.asarray(adjacent_edges)
+                if adjacent_edges.ndim == 1:
+                    adjacent_edges = adjacent_edges.reshape(1, -1)
+                weighted_adjacent = np.column_stack(
+                    (
+                        adjacent_edges[:, 0].astype(float),
+                        adjacent_edges[:, 1].astype(float),
+                        np.ones(adjacent_edges.shape[0], dtype=float),
+                    )
+                )
+                old_edges_to_add = np.vstack((old_edges_to_add, weighted_adjacent))
 
-        # remove first row which was just to do the above construction, and only get unique edges
-        # old_edges_to_add = np.unique(np.sort(old_edges_to_add[1:,:], axis=1), axis=0)
-
-        edges_df = pd.DataFrame(old_edges_to_add[1:, :], columns=['source', 'target'])
-
-        # Ensure sorting of each row for consistent edge representation
-        # This is equivalent to np.sort(old_edges_to_add[1:,:], axis=1) but for pandas DataFrame
-        edges_df = pd.DataFrame(np.sort(edges_df.values, axis=1), columns=edges_df.columns)
-
-        # Drop duplicates to get unique edges
-        unique_edges_df = edges_df.drop_duplicates()
-
-        # Convert back to numpy array if needed (optional step depending on further usage)
-        unique_edges = unique_edges_df.to_numpy()
+        if old_edges_to_add.shape[0] > 0:
+            edges_df = pd.DataFrame(old_edges_to_add, columns=['source', 'target', 'weight'])
+            sorted_endpoints = np.sort(edges_df[['source', 'target']].values.astype(int), axis=1)
+            edges_df['source'] = sorted_endpoints[:, 0]
+            edges_df['target'] = sorted_endpoints[:, 1]
+            # Keep one entry per undirected edge; this avoids double counting when
+            # both endpoints were selected for pull-out.
+            edges_df = edges_df.drop_duplicates(subset=['source', 'target'], keep='first')
+            old_edges_to_add = edges_df[['source', 'target', 'weight']].to_numpy(dtype=float)
 
 
         # get the cluster assignment of each vertex.
@@ -250,11 +274,27 @@ class Contracted_Graph:
         og_vertex_to_contract_idx = np.array(clusters_to_labels(self.contracted_node_to_full_node_map,
                                                                         num_data_points=len(self.degree_array)))
 
-        edges_to_add = np.array(edges_to_add)
+        incoming_edges = np.asarray(edges_to_add)
+        if incoming_edges.size == 0:
+            incoming_edges = np.zeros((0, 3), dtype=float)
+        else:
+            if incoming_edges.ndim == 1:
+                incoming_edges = incoming_edges.reshape(1, -1)
+            if incoming_edges.shape[1] >= 3:
+                incoming_edges = incoming_edges[:, :3].astype(float)
+            else:
+                incoming_edges = np.column_stack(
+                    (
+                        incoming_edges[:, 0].astype(float),
+                        incoming_edges[:, 1].astype(float),
+                        np.ones(incoming_edges.shape[0], dtype=float),
+                    )
+                )
 
-        # these are all the edges to be added into the contracted graph.
-        # edges here are still indexed by their new labels
-        edges_to_add = np.vstack((edges_to_add, old_edges_to_add))
+        # These are all edge-mass updates to apply in the contracted graph.
+        edges_to_add = incoming_edges
+        if old_edges_to_add.shape[0] > 0:
+            edges_to_add = np.vstack((edges_to_add, old_edges_to_add))
 
 
         # compute the weight needed to be added between all vertices in the contracted graph
@@ -263,10 +303,12 @@ class Contracted_Graph:
 
 
         # add edges to contracted graph
-        edges_and_weights = np.hstack((edges_in_cg[:, :2], total_weights[:, None]))
-
-        self.contracted_graph.add_edge_list(edges_and_weights,
-                                            eprops=[self.contracted_graph.ep["edge_weight"]])
+        if len(edges_in_cg) > 0:
+            edges_and_weights = np.hstack((edges_in_cg[:, :2], total_weights[:, None]))
+            self.contracted_graph.add_edge_list(
+                edges_and_weights,
+                eprops=[self.contracted_graph.ep["edge_weight"]],
+            )
 
         return
 

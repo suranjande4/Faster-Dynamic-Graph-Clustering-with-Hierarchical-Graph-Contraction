@@ -24,6 +24,8 @@ class SemiContractedGraph:
         sparsifier,
         degree_trigger: float = 0.5,
         contracted: Optional[Contracted_Graph] = None,
+        allow_self_loops: bool = False,
+        count_existing_edge_updates: bool = False,
     ) -> None:
         # Keep reference to the main dynamic graph.
         self.original_graph = original_graph
@@ -33,6 +35,12 @@ class SemiContractedGraph:
 
         # Threshold used by underlying Contracted_Graph.update logic.
         self.degree_trigger = float(degree_trigger)
+        # Higher hierarchy levels may intentionally propagate same-supernode updates
+        # as self-loop mass.
+        self.allow_self_loops = bool(allow_self_loops)
+        # When True, an incoming edge on an existing weighted edge is treated as
+        # one more unit of edge mass (weight +1), rather than being ignored.
+        self.count_existing_edge_updates = bool(count_existing_edge_updates)
 
         # Read current sparsified graph H_t from sparsifier.
         self.sparsified_graph = self.sparsifier.get_sparsified_graph()
@@ -60,6 +68,12 @@ class SemiContractedGraph:
 
         # Remember last cluster count used by reconstruction.
         self.last_num_clusters: Optional[int] = None
+
+    @staticmethod
+    def _degree_array(graph: gt.Graph) -> np.ndarray:
+        if "edge_weight" in graph.edge_properties:
+            return graph.degree_property_map("total", weight=graph.ep["edge_weight"]).a.copy()
+        return graph.degree_property_map("total").a.copy()
 
     @staticmethod
     def _safe_weighted_edges(graph: gt.Graph) -> np.ndarray:
@@ -193,21 +207,12 @@ class SemiContractedGraph:
 
     def cluster_volumes(self) -> np.ndarray:
         """
-        Compute contracted-node volume as incident weighted-edge sum.
+        Compute contracted-node volume as weighted degree in the contracted graph.
         """
-        mapping = self.contracted.contracted_node_to_full_node_map
-        volumes = np.zeros(len(mapping), dtype=float)
-
-        edges = self._safe_weighted_edges(self.contracted.contracted_graph)
-        if edges.size == 0:
-            return volumes
-
-        # Volume(i) = sum of weights on edges touching node i.
-        for cid in range(len(mapping)):
-            mask = (edges[:, 0].astype(int) == cid) | (edges[:, 1].astype(int) == cid)
-            volumes[cid] = float(np.sum(edges[mask, 2]))
-
-        return volumes
+        cg = self.contracted.contracted_graph
+        if int(cg.num_vertices()) == 0:
+            return np.zeros(0, dtype=float)
+        return self._degree_array(cg).astype(float)
 
     def _rebuild_semicontracted_from_mapping(
         self, updated_clusters: Sequence[Sequence[int]]
@@ -265,7 +270,7 @@ class SemiContractedGraph:
         self.contracted.contracted_graph = new_g
         self.contracted.contracted_node_to_full_node_map = clusters
         self.contracted.og_num_contract_nodes = len(clusters)
-        self.contracted.degree_array = self.original_graph.degree_property_map("total").a.copy()
+        self.contracted.degree_array = self._degree_array(self.original_graph)
         self.contracted.degree_array_at_construction = self.contracted.degree_array.copy()
 
     def unfold_by_alpha(self) -> int:
@@ -310,9 +315,10 @@ class SemiContractedGraph:
 
         Procedure:
         1) normalize + deduplicate incoming edges
-        2) keep only truly new edges
-        3) add all new edges to G in one shot
-        4) alpha += number of added edges
+        2) apply updates to G:
+           - add truly new edges
+           - optionally count repeated updates as weight increments on weighted graphs
+        3) alpha += number of effective updates
         5) update sparsifier + contracted graph once
         6) unfold by alpha once
         """
@@ -342,35 +348,50 @@ class SemiContractedGraph:
         max_vertex_idx = max(max(int(u), int(v)) for u, v in raw_edges)
         created_vertices = self._ensure_vertices_exist(max_vertex_idx)
 
-        # Normalize + deduplicate + drop self loops.
+        # Normalize + deduplicate.
         unique_edges = []
         seen = set()
         for edge in raw_edges:
             u, v = self._norm_edge(int(edge[0]), int(edge[1]))
-            if u == v:
+            if u == v and not self.allow_self_loops:
                 continue
             if (u, v) in seen:
                 continue
             seen.add((u, v))
             unique_edges.append((u, v))
 
-        # Keep only edges not already present in G.
+        has_edge_weights = "edge_weight" in self.original_graph.edge_properties
+        weight_prop = self.original_graph.ep["edge_weight"] if has_edge_weights else None
+
+        # Keep track of topological inserts and all effective updates.
         edges_to_add = []
+        effective_edges = []
         for u, v in unique_edges:
-            if self.original_graph.edge(u, v) is None:
+            existing = self.original_graph.edge(u, v)
+            if existing is None:
                 edges_to_add.append((u, v))
+                effective_edges.append((u, v))
+            elif self.count_existing_edge_updates and has_edge_weights:
+                weight_prop[existing] += 1.0
+                effective_edges.append((u, v))
 
-        num_applied = len(edges_to_add)
+        # Add all truly new edges.
+        if len(edges_to_add) > 0:
+            if has_edge_weights:
+                for u, v in edges_to_add:
+                    e = self.original_graph.add_edge(u, v)
+                    weight_prop[e] = 1.0
+            else:
+                self.original_graph.add_edge_list(np.array(edges_to_add, dtype=int))
 
-        # Add all new edges in one shot.
+        num_applied = len(effective_edges)
         if num_applied > 0:
-            self.original_graph.add_edge_list(np.array(edges_to_add, dtype=int))
             self.alpha += num_applied
             self.updates_since_rebuild += num_applied
 
         # Keep H and semi-contracted state synced.
         incoming = (
-            np.array(edges_to_add, dtype=int)
+            np.array(effective_edges, dtype=int)
             if num_applied > 0
             else np.empty((0, 2), dtype=int)
         )
@@ -388,7 +409,7 @@ class SemiContractedGraph:
             "changed": bool(num_applied > 0 or len(created_vertices) > 0),
             "attempted_edges": len(raw_edges),
             "unique_edges": len(unique_edges),
-            "applied_edges": edges_to_add,
+            "applied_edges": effective_edges,
             "num_applied": num_applied,
             "created_vertices": created_vertices,
             "alpha": self.alpha,

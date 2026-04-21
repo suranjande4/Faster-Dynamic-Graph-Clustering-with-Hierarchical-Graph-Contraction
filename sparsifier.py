@@ -31,21 +31,22 @@ class DynamicGraphSparsifier:
 
 
         # Initialize property maps for degrees and sampling probabilities
-        self.node_degrees = self.original_graph.degree_property_map("total")
-
-        self.degree_array = self.node_degrees.a
+        self.degree_array = self._degree_array(self.original_graph)
         self.used_samping_parameters = None
+
+    @staticmethod
+    def _degree_array(graph: Graph) -> np.ndarray:
+        if "edge_weight" in graph.edge_properties:
+            return graph.degree_property_map("total", weight=graph.ep["edge_weight"]).a.copy()
+        return graph.degree_property_map("total").a.copy()
 
     def create_sparsifier(self):
 
         self.sparsified_graph = Graph(directed=False)
         self.sparsified_graph.set_fast_edge_removal(fast=True)
 
-        # Initialize property maps for degrees and sampling probabilities
-        self.node_degrees = self.original_graph.degree_property_map("total")
-
-
-        self.degree_array = self.node_degrees.a
+        # Initialize degree array (weighted if edge weights are present).
+        self.degree_array = self._degree_array(self.original_graph)
 
 
         log_n = np.log(self.original_graph.num_vertices())
@@ -85,9 +86,8 @@ class DynamicGraphSparsifier:
         n_sparse_old = self.sparsified_graph.num_vertices()
         log_n = np.log(n)
 
-        # Update degrees and recompute the degree array
-        self.node_degrees = self.original_graph.degree_property_map("total")
-        self.degree_array = self.node_degrees.a
+        # Update degrees and recompute the degree array.
+        self.degree_array = self._degree_array(self.original_graph)
 
         print_verbose("Adding nodes to sparse graph processing time", start_time)
         affected_nodes = set(chain.from_iterable(incoming_edges))

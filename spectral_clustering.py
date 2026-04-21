@@ -6,12 +6,14 @@ import stag.cluster
 import stag.spectrum
 import numpy as np
 import time
+import warnings
 
 
 from sklearn.cluster import SpectralClustering
 from sklearn.metrics import adjusted_rand_score
 
 from sklearn.cluster import KMeans
+from sklearn.exceptions import ConvergenceWarning
 import scipy
 import scipy.sparse as sp
 
@@ -54,15 +56,41 @@ def spectral_clustering(graph: Graph, num_clusters: int, num_eigenvectors=None, 
     # Cluster the graph
     g = stag.graph.Graph(adj + adj.transpose())
 
-    if num_clusters < g.number_of_vertices() / 2:
-        labels = stag.cluster.spectral_cluster(g, num_clusters).tolist()
-    else:
+    def _kmeans_with_guard(requested_clusters: int):
         laplacian_matrix = g.normalised_laplacian().to_scipy()
-        _, eigenvectors = scipy.sparse.linalg.eigsh(laplacian_matrix, num_eigenvectors, which='SM')
-        # Fix random_state so repeated runs are reproducible.
-        labels = KMeans(n_clusters=num_clusters, n_init=10, random_state=0).fit_predict(
-            eigenvectors
-        )
+        eig_k = max(1, min(int(num_eigenvectors), g.number_of_vertices() - 1))
+        _, eigenvectors = scipy.sparse.linalg.eigsh(laplacian_matrix, eig_k, which='SM')
+
+        # KMeans cannot create more clusters than distinct embedding rows.
+        distinct_rows = int(np.unique(eigenvectors, axis=0).shape[0])
+        k_eff = max(1, min(int(requested_clusters), distinct_rows))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ConvergenceWarning)
+            labels_local = KMeans(n_clusters=k_eff, n_init=10, random_state=0).fit_predict(
+                eigenvectors
+            )
+
+        # In numerically degenerate embeddings, sklearn can still end up with
+        # fewer clusters than requested. Rerun at that realized count.
+        if any(issubclass(w.category, ConvergenceWarning) for w in caught):
+            realized_k = int(np.unique(labels_local).shape[0])
+            if 1 <= realized_k < k_eff:
+                k_eff = realized_k
+                labels_local = KMeans(
+                    n_clusters=k_eff, n_init=10, random_state=0
+                ).fit_predict(eigenvectors)
+        return labels_local, k_eff
+
+    if num_clusters < g.number_of_vertices() / 2:
+        # STAG can still trigger sklearn ConvergenceWarning internally in some
+        # degenerate embeddings. If that happens, fallback to guarded KMeans.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ConvergenceWarning)
+            labels = stag.cluster.spectral_cluster(g, num_clusters).tolist()
+        if any(issubclass(w.category, ConvergenceWarning) for w in caught):
+            labels, num_clusters = _kmeans_with_guard(num_clusters)
+    else:
+        labels, num_clusters = _kmeans_with_guard(num_clusters)
 
     # # Get the normalised laplacian matrix of the graph
     # if 'edge_weight' in graph.ep.keys():
