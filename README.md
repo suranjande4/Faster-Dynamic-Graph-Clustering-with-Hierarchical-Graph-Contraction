@@ -1,4 +1,4 @@
-# Dynamic Spectral Clustering Experiments
+# Code for Faster Dynamic Graph Clustering with Hierarchical Contraction
 
 This is the  repository for the paper *Faster Dynamic Graph Clustering
 with Hierarchical Contraction*, accepted at NeurIPS 2026. It contains the
