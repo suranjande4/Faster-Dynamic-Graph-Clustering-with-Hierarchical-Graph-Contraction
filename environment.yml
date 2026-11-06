@@ -1,0 +1,15 @@
+name: dynamic-spectral-clustering
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - graph-tool
+  - numpy=1.26
+  - scipy
+  - scikit-learn
+  - matplotlib
+  - joblib
+  - pip
+  - pip:
+      - emnist
+      - stag==2.1.2

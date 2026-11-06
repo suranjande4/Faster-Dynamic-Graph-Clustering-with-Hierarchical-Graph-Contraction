@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Environments and editors
+.conda/
+.venv/
+venv/
+.idea/
+.vscode/
+
+# Downloaded or generated datasets and graphs
+mnist_data/
+emnist_data/
+*.gt
+*.pkl
+
+# Experiment outputs
+results/
+results-*/
+sbm_exp1/
+res-exp2/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
