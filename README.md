@@ -1,10 +1,10 @@
 # Dynamic Spectral Clustering Experiments
 
-This repository contains the implementation and experiment drivers for comparing
-dynamic spectral clustering methods on stochastic block model (SBM), MNIST, and
-EMNIST workloads. The evaluated methods include the LS24 baseline, a
-semi-contracted method, and a multi-level contracted hierarchy.
-
+This is the  repository for the paper *Faster Dynamic Graph Clustering
+with Hierarchical Contraction*, accepted at NeurIPS 2026. It contains the
+implementation and experiment drivers for the stochastic block model (SBM),
+MNIST, and EMNIST experiments. The evaluated methods include the LS24 baseline,
+a semi-contracted method, and our multi-level hierarchical contraction method.
 ## Installation
 
 The experiments use [`graph-tool`](https://graph-tool.skewed.de/), so Conda is
